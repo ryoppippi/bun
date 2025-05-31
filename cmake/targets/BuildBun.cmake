@@ -408,6 +408,7 @@ set(BUN_OBJECT_LUT_SOURCES
   ${CWD}/src/bun.js/bindings/ProcessBindingConstants.cpp
   ${CWD}/src/bun.js/bindings/ProcessBindingFs.cpp
   ${CWD}/src/bun.js/bindings/ProcessBindingNatives.cpp
+  ${CWD}/src/bun.js/bindings/ProcessBindingHTTPParser.cpp
   ${CWD}/src/bun.js/modules/NodeModuleModule.cpp
   ${CODEGEN_PATH}/ZigGeneratedClasses.lut.txt
 )
@@ -421,6 +422,7 @@ set(BUN_OBJECT_LUT_OUTPUTS
   ${CODEGEN_PATH}/ProcessBindingConstants.lut.h
   ${CODEGEN_PATH}/ProcessBindingFs.lut.h
   ${CODEGEN_PATH}/ProcessBindingNatives.lut.h
+  ${CODEGEN_PATH}/ProcessBindingHTTPParser.lut.h
   ${CODEGEN_PATH}/NodeModuleModule.lut.h
   ${CODEGEN_PATH}/ZigGeneratedClasses.lut.h
 )
@@ -732,6 +734,7 @@ target_include_directories(${bun} PRIVATE
   ${CWD}/src/bun.js/bindings/webcore
   ${CWD}/src/bun.js/bindings/webcrypto
   ${CWD}/src/bun.js/bindings/node/crypto
+  ${CWD}/src/bun.js/bindings/node/http
   ${CWD}/src/bun.js/bindings/sqlite
   ${CWD}/src/bun.js/bindings/v8
   ${CWD}/src/bun.js/modules
@@ -935,6 +938,7 @@ if(LINUX)
   if(NOT ABI STREQUAL "musl")
   target_link_options(${bun} PUBLIC
     -Wl,--wrap=exp
+    -Wl,--wrap=exp2
     -Wl,--wrap=expf
     -Wl,--wrap=fcntl64
     -Wl,--wrap=log
@@ -1057,6 +1061,7 @@ set(BUN_DEPENDENCIES
   TinyCC
   Zlib
   LibArchive # must be loaded after zlib
+  HdrHistogram # must be loaded after zlib
   Zstd
 )
 
