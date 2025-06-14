@@ -237,6 +237,7 @@ pub const Arguments = struct {
         clap.parseParam("--zero-fill-buffers                Boolean to force Buffer.allocUnsafe(size) to be zero-filled.") catch unreachable,
         clap.parseParam("--redis-preconnect                Preconnect to $REDIS_URL at startup") catch unreachable,
         clap.parseParam("--no-addons                       Throw an error if process.dlopen is called, and disable export condition \"node-addons\"") catch unreachable,
+        clap.parseParam("--unhandled-rejections <STR>      One of \"strict\", \"throw\", \"warn\", \"none\", \"warn-with-error-code\", or \"bun\" (default)") catch unreachable,
     };
 
     const auto_or_run_params = [_]ParamType{
@@ -357,7 +358,7 @@ pub const Arguments = struct {
             ctx.log.level = original_level;
         }
         ctx.log.level = logger.Log.Level.warn;
-        try Bunfig.parse(allocator, logger.Source.initPathString(bun.asByteSlice(config_path), contents), ctx, cmd);
+        try Bunfig.parse(allocator, &logger.Source.initPathString(bun.asByteSlice(config_path), contents), ctx, cmd);
     }
 
     fn getHomeConfigPath(buf: *bun.PathBuffer) ?[:0]const u8 {
@@ -710,6 +711,14 @@ pub const Arguments = struct {
                 // used for disabling process.dlopen and
                 // for disabling export condition "node-addons"
                 opts.allow_addons = false;
+            }
+
+            if (args.option("--unhandled-rejections")) |unhandled_rejections| {
+                const resolved = Api.UnhandledRejections.map.get(unhandled_rejections) orelse {
+                    Output.errGeneric("Invalid value for --unhandled-rejections: \"{s}\". Must be one of \"strict\", \"throw\", \"warn\", \"none\", \"warn-with-error-code\", or \"bun\"\n", .{unhandled_rejections});
+                    Global.exit(1);
+                };
+                opts.unhandled_rejections = resolved;
             }
 
             if (args.option("--port")) |port_str| {
@@ -1365,6 +1374,7 @@ pub const HelpCommand = struct {
         \\  <b><blue>add<r>       <d>{s:<16}<r>     Add a dependency to package.json <d>(bun a)<r>
         \\  <b><blue>remove<r>    <d>{s:<16}<r>     Remove a dependency from package.json <d>(bun rm)<r>
         \\  <b><blue>update<r>    <d>{s:<16}<r>     Update outdated dependencies
+        \\  <b><blue>audit<r>                          Check installed packages for vulnerabilities
         \\  <b><blue>outdated<r>                       Display latest versions of outdated dependencies
         \\  <b><blue>link<r>      <d>[\<package\>]<r>          Register or link a local npm package
         \\  <b><blue>unlink<r>                         Unregister a local npm package
@@ -1757,6 +1767,7 @@ pub const Command = struct {
 
             RootCommandMatcher.case("outdated") => .OutdatedCommand,
             RootCommandMatcher.case("publish") => .PublishCommand,
+            RootCommandMatcher.case("audit") => .AuditCommand,
 
             // These are reserved for future use by Bun, so that someone
             // doing `bun deploy` to run a script doesn't accidentally break
@@ -1813,29 +1824,31 @@ pub const Command = struct {
         }
 
         // bun build --compile entry point
-        if (try bun.StandaloneModuleGraph.fromExecutable(bun.default_allocator)) |graph| {
-            context_data = .{
-                .args = std.mem.zeroes(Api.TransformOptions),
-                .log = log,
-                .start_time = start_time,
-                .allocator = bun.default_allocator,
-            };
-            global_cli_ctx = &context_data;
-            var ctx = global_cli_ctx;
+        if (!bun.getRuntimeFeatureFlag(.BUN_BE_BUN)) {
+            if (try bun.StandaloneModuleGraph.fromExecutable(bun.default_allocator)) |graph| {
+                context_data = .{
+                    .args = std.mem.zeroes(Api.TransformOptions),
+                    .log = log,
+                    .start_time = start_time,
+                    .allocator = bun.default_allocator,
+                };
+                global_cli_ctx = &context_data;
+                var ctx = global_cli_ctx;
 
-            ctx.args.target = Api.Target.bun;
-            if (bun.argv.len > 1) {
-                ctx.passthrough = bun.argv[1..];
-            } else {
-                ctx.passthrough = &[_]string{};
+                ctx.args.target = Api.Target.bun;
+                if (bun.argv.len > 1) {
+                    ctx.passthrough = bun.argv[1..];
+                } else {
+                    ctx.passthrough = &[_]string{};
+                }
+
+                try @import("./bun_js.zig").Run.bootStandalone(
+                    ctx,
+                    graph.entryPoint().name,
+                    graph,
+                );
+                return;
             }
-
-            try @import("./bun_js.zig").Run.bootStandalone(
-                ctx,
-                graph.entryPoint().name,
-                graph,
-            );
-            return;
         }
 
         debug("argv: [{s}]", .{bun.fmt.fmtSlice(bun.argv, ", ")});
@@ -1905,6 +1918,13 @@ pub const Command = struct {
 
                 try PublishCommand.exec(ctx);
                 return;
+            },
+            .AuditCommand => {
+                if (comptime bun.fast_debug_build_mode and bun.fast_debug_build_cmd != .AuditCommand) unreachable;
+                const ctx = try Command.init(allocator, log, .AuditCommand);
+
+                try AuditCommand.exec(ctx);
+                unreachable;
             },
             .BunxCommand => {
                 if (comptime bun.fast_debug_build_mode and bun.fast_debug_build_cmd != .BunxCommand) unreachable;
@@ -2333,6 +2353,7 @@ pub const Command = struct {
         PatchCommitCommand,
         OutdatedCommand,
         PublishCommand,
+        AuditCommand,
 
         /// Used by crash reports.
         ///
@@ -2366,6 +2387,7 @@ pub const Command = struct {
                 .PatchCommitCommand => 'z',
                 .OutdatedCommand => 'o',
                 .PublishCommand => 'k',
+                .AuditCommand => 'A',
             };
         }
 
@@ -2617,10 +2639,11 @@ pub const Command = struct {
                     , .{});
                     Output.flush();
                 },
-                .OutdatedCommand, .PublishCommand => {
+                .OutdatedCommand, .PublishCommand, .AuditCommand => {
                     Install.PackageManager.CommandLineArguments.printHelp(switch (cmd) {
                         .OutdatedCommand => .outdated,
                         .PublishCommand => .publish,
+                        .AuditCommand => .audit,
                     });
                 },
                 else => {
@@ -2641,6 +2664,7 @@ pub const Command = struct {
                 .PatchCommitCommand,
                 .OutdatedCommand,
                 .PublishCommand,
+                .AuditCommand,
                 => true,
                 else => false,
             };
@@ -2660,6 +2684,7 @@ pub const Command = struct {
                 .PatchCommitCommand,
                 .OutdatedCommand,
                 .PublishCommand,
+                .AuditCommand,
                 => true,
                 else => false,
             };
@@ -2681,6 +2706,7 @@ pub const Command = struct {
             .RunAsNodeCommand = true,
             .OutdatedCommand = true,
             .PublishCommand = true,
+            .AuditCommand = true,
         });
 
         pub const always_loads_config: std.EnumArray(Tag, bool) = std.EnumArray(Tag, bool).initDefault(false, .{
@@ -2696,6 +2722,7 @@ pub const Command = struct {
             .BunxCommand = true,
             .OutdatedCommand = true,
             .PublishCommand = true,
+            .AuditCommand = true,
         });
 
         pub const uses_global_options: std.EnumArray(Tag, bool) = std.EnumArray(Tag, bool).initDefault(true, .{
@@ -2712,6 +2739,7 @@ pub const Command = struct {
             .BunxCommand = false,
             .OutdatedCommand = false,
             .PublishCommand = false,
+            .AuditCommand = false,
         });
     };
 };
